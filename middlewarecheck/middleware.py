@@ -17,7 +17,7 @@ from ConfigParser import ConfigParser
 import json
 import os
 
-from swift.common.swob import Request, Response
+from swift.common.swob import Request, Response, HTTPServiceUnavailable, wsgify
 
 
 class MiddlewareCheckMiddleware(object):
@@ -48,46 +48,40 @@ class MiddlewareCheckMiddleware(object):
 
     def __init__(self, app, conf):
         self.app = app
+        self.disable_path = conf.get('disable_path', '')
+        proxy_conf = ConfigParser()
+        swift_dir = conf.get('swift_dir', '/etc/swift')
         try:
-            proxy_conf = ConfigParser()
-            swift_dir = conf.get('swift_dir', '/etc/swift')
             proxy_conf.read(
                 '{swift_dir}/proxy-server.conf'.format(swift_dir=swift_dir))
             self.pipeline = proxy_conf.get(
-                'pipeline:main', 'pipeline').split(' ')
+                'pipeline:main', 'pipeline').split()
         except IOError:
             self.pipeline = None
-
-        self.disable_path = conf.get('disable_path', '')
 
     def GET(self, req):
         """Returns a 200 response with the installed middleware in the body."""
 
         if not self.pipeline:
-            return Response(
-                request=req, body='Service Unavailable', status=503)
-
+            raise HTTPServiceUnavailable()
+#don't know if this is better or not...
+#        body = json.dumps({'server_type': 'swift_proxy',
+#                           'pipeline': self.pipeline})
         body = json.dumps({'swift_proxy': {'pipeline': self.pipeline}})
         return Response(
             request=req, body=body, content_type="application/json")
 
-    def DISABLED(self, req):
-        """Returns a 503 response with "DISABLED BY FILE" in the body."""
-        return Response(request=req, status=503, body="DISABLED BY FILE",
-                        content_type="text/plain")
-
-    def __call__(self, env, start_response):
-        req = Request(env)
+    @wsgify
+    def __call__(self, req):
         try:
             if req.path == '/middlewarecheck':
-                handler = self.GET
                 if self.disable_path and os.path.exists(self.disable_path):
-                    handler = self.DISABLED
-                return handler(req)(env, start_response)
-        except UnicodeError:
+                    raise HTTPServiceUnavailable()
+                return self.GET(req)
+        except UnicodeError: # what's going to throw the UnicodeError?
             # definitely, this is not /middlewarecheck
             pass
-        return self.app(env, start_response)
+        return self.app
 
 
 def filter_factory(global_conf, **local_conf):
